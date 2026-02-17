@@ -1,0 +1,26 @@
+{
+  "name": "found-backend",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Structured TypeScript backend API for Found",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.2",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "playwright-core": "^1.51.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.13.5",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}
