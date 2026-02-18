@@ -5,6 +5,7 @@ import { env } from "../../config/env";
 import { HttpError } from "../../errors/http-error";
 import { addActivity, createId, isoDate, persistStore, store } from "../../store/store";
 import type { LinkedInBrowserRun, LinkedInBrowserStep } from "../../types/domain";
+import { emitAutomationUpdate } from "../../events/automation-bus";
 
 interface LinkedInBrowserPayload {
   searchQuery?: string;
@@ -13,9 +14,11 @@ interface LinkedInBrowserPayload {
   maxJobs?: number;
   submitApplications?: boolean;
   sendRecruiterMessages?: boolean;
+  connectWithEmployees?: boolean;
   approvals?: {
     submitApplications?: boolean;
     sendMessages?: boolean;
+    sendConnections?: boolean;
   };
   dryRun?: boolean;
 }
@@ -169,12 +172,40 @@ function shouldAllowMessages(payload: LinkedInBrowserPayload): boolean {
   return payload.approvals?.sendMessages === true;
 }
 
+function shouldAllowConnections(payload: LinkedInBrowserPayload): boolean {
+  return payload.approvals?.sendConnections === true;
+}
+
 function inferStoreJob(title: string, company: string) {
   return store.jobs.find(
     (job) =>
       job.title.toLowerCase() === title.toLowerCase() &&
       job.company.toLowerCase() === company.toLowerCase(),
   );
+}
+
+function getEmployeeTargets(company: string, limit = 6) {
+  const matches = store.connections
+    .filter((connection) => connection.company.toLowerCase() === company.toLowerCase())
+    .sort((a, b) => b.relevanceScore - a.relevanceScore)
+    .slice(0, limit);
+
+  if (matches.length > 0) {
+    return matches;
+  }
+
+  // Synthetic fallbacks so the UX still shows who would be targeted.
+  return Array.from({ length: Math.min(3, limit) }).map((_, i) => ({
+    id: `synthetic-${company}-${i}`,
+    name: `${company} Engineer ${i + 1}`,
+    headline: `Engineer at ${company}`,
+    company,
+    avatar: "",
+    mutualConnections: 0,
+    relevanceScore: 60 - i * 5,
+    status: "suggested" as const,
+    tags: ["Employee"],
+  }));
 }
 
 export function listLinkedInBrowserRuns() {
@@ -184,11 +215,25 @@ export function listLinkedInBrowserRuns() {
 export async function runLinkedInBrowserAutomation(payload: LinkedInBrowserPayload) {
   const { query, location } = normalizeQuery(payload);
   const steps: LinkedInBrowserStep[] = [];
+  const runId = createId("lnbrowser");
+  const createdAt = new Date().toISOString();
+
+  const runningRun: LinkedInBrowserRun = {
+    id: runId,
+    createdAt,
+    query,
+    location,
+    status: "running",
+    discoveredJobs: [],
+    steps: [],
+  };
+  store.linkedInBrowserRuns.unshift(runningRun);
+  emitAutomationUpdate({ source: "browser", run: runningRun });
 
   if (payload.dryRun) {
     const dryRun: LinkedInBrowserRun = {
-      id: createId("lnbrowser"),
-      createdAt: new Date().toISOString(),
+      id: runId,
+      createdAt,
       query,
       location,
       status: "partial",
@@ -206,6 +251,7 @@ export async function runLinkedInBrowserAutomation(payload: LinkedInBrowserPaylo
 
     store.linkedInBrowserRuns.unshift(dryRun);
     persistStore();
+    emitAutomationUpdate({ source: "browser", run: dryRun });
     return dryRun;
   }
 
@@ -318,6 +364,7 @@ export async function runLinkedInBrowserAutomation(payload: LinkedInBrowserPaylo
 
     if (payload.sendRecruiterMessages) {
       const allowMessages = shouldAllowMessages(payload);
+      const allowConnections = shouldAllowConnections(payload);
 
       if (!allowMessages) {
         pushStep(steps, {
@@ -339,16 +386,48 @@ export async function runLinkedInBrowserAutomation(payload: LinkedInBrowserPaylo
           .slice(0, 5);
 
         recruiters.forEach((recruiter) => {
+          const note = `Hi ${recruiter.name}, I found a relevant opening at ${recruiter.company} and would appreciate guidance or a referral for this role.`;
+
           store.followUps.unshift({
             id: createId("f"),
             contactName: recruiter.name,
             company: recruiter.company,
             scheduledDate: isoDate(),
             type: "LinkedIn Recruiter Outreach",
-            aiMessage: `Hi ${recruiter.name}, I found a relevant opening and would appreciate guidance on the process.`,
+            aiMessage: note,
             status: "pending",
           });
+
+          if (allowConnections) {
+            store.outreachHistory.unshift({
+              id: createId("conn"),
+              contactName: recruiter.name,
+              company: recruiter.company,
+              scheduledDate: isoDate(),
+              type: "LinkedIn Connection Request",
+              aiMessage: note,
+              status: "pending",
+              sentAt: new Date().toISOString(),
+            });
+          }
         });
+
+        if (payload.connectWithEmployees) {
+          const employees = getEmployeeTargets(companyHint, 4);
+          employees.forEach((person) => {
+            const note = `Hi ${person.name}, I'm applying for a role at ${person.company}. Would you be open to connecting and possibly sharing a referral?`;
+            store.outreachHistory.unshift({
+              id: createId("conn"),
+              contactName: person.name,
+              company: person.company,
+              scheduledDate: isoDate(),
+              type: "LinkedIn Connection Request",
+              aiMessage: note,
+              status: allowConnections ? "pending" : "draft",
+              sentAt: new Date().toISOString(),
+            });
+          });
+        }
 
         pushStep(steps, {
           id: "message_recruiters",
@@ -372,8 +451,8 @@ export async function runLinkedInBrowserAutomation(payload: LinkedInBrowserPaylo
     );
 
     const run: LinkedInBrowserRun = {
-      id: createId("lnbrowser"),
-      createdAt: new Date().toISOString(),
+      id: runId,
+      createdAt,
       query,
       location,
       status: hasError ? "error" : hasPartial ? "partial" : "success",
@@ -381,7 +460,12 @@ export async function runLinkedInBrowserAutomation(payload: LinkedInBrowserPaylo
       steps,
     };
 
-    store.linkedInBrowserRuns.unshift(run);
+    const existingIndex = store.linkedInBrowserRuns.findIndex((item) => item.id === runId);
+    if (existingIndex >= 0) {
+      store.linkedInBrowserRuns[existingIndex] = run;
+    } else {
+      store.linkedInBrowserRuns.unshift(run);
+    }
 
     addActivity(
       "network",
@@ -392,13 +476,14 @@ export async function runLinkedInBrowserAutomation(payload: LinkedInBrowserPaylo
 
     persistStore();
 
+    emitAutomationUpdate({ source: "browser", run });
     return run;
   } catch (error) {
     const message = error instanceof Error ? error.message : "LinkedIn browser automation failed";
 
     const failedRun: LinkedInBrowserRun = {
-      id: createId("lnbrowser"),
-      createdAt: new Date().toISOString(),
+      id: runId,
+      createdAt,
       query,
       location,
       status: "error",
@@ -414,9 +499,15 @@ export async function runLinkedInBrowserAutomation(payload: LinkedInBrowserPaylo
       ],
     };
 
-    store.linkedInBrowserRuns.unshift(failedRun);
+    const existingIndex = store.linkedInBrowserRuns.findIndex((item) => item.id === runId);
+    if (existingIndex >= 0) {
+      store.linkedInBrowserRuns[existingIndex] = failedRun;
+    } else {
+      store.linkedInBrowserRuns.unshift(failedRun);
+    }
     persistStore();
 
+    emitAutomationUpdate({ source: "browser", run: failedRun });
     throw error;
   } finally {
     await browser.close();

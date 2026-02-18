@@ -17,6 +17,7 @@ import type {
   MessageTone,
   Referral,
 } from "../../types/domain";
+import { emitAutomationUpdate } from "../../events/automation-bus";
 
 interface LinkedInAgentActions {
   discoverJobs?: boolean;
@@ -175,9 +176,9 @@ function draftRecruiterMessage(params: {
   tone: MessageTone;
 }): string {
   const baseByTone: Record<MessageTone, string> = {
-    professional: `Hi ${params.name}, I am exploring the ${params.role} role at ${params.company} and would appreciate your guidance on the current hiring process.`,
-    casual: `Hi ${params.name}, I saw the ${params.role} opening at ${params.company} and wanted to connect to learn how the team is hiring right now.`,
-    formal: `Hello ${params.name}, I am writing regarding the ${params.role} opportunity at ${params.company}. I would value any direction on next steps in the process.`,
+    professional: `Hi ${params.name}, I am exploring the ${params.role} role at ${params.company}. I'd like to connect and would appreciate a brief referral or guidance on next steps.`,
+    casual: `Hi ${params.name}, I saw the ${params.role} opening at ${params.company} and would love to connect. If you're open, a quick referral pointer would be amazing.`,
+    formal: `Hello ${params.name}, I am writing regarding the ${params.role} opportunity at ${params.company}. I kindly request a referral or direction on the appropriate hiring contact.`,
   };
 
   return `${baseByTone[params.tone]}\n\nBest regards,\n${store.profile.name}`;
@@ -194,7 +195,7 @@ function createFollowUpMessage(params: {
     contactName: params.contactName,
     company: params.company,
     scheduledDate: isoDate(),
-    type: `Recruiter Outreach — ${params.role}`,
+    type: `Connection + Referral Request — ${params.role}`,
     aiMessage: params.message,
     status: "pending",
   };
@@ -271,6 +272,26 @@ export function runLinkedInAgent(payload: CreateLinkedInRunPayload) {
 
   const job = resolvePrimaryJob(payload.jobId, payload.searchQuery);
   const opportunities = discoverOpportunities(payload.searchQuery, 8);
+
+  const runId = createId("lnrun");
+  const runningRun: LinkedInAgentRun = {
+    id: runId,
+    mode,
+    jobId: job.id,
+    company: job.company,
+    role: job.title,
+    createdAt: new Date().toISOString(),
+    status: "running",
+    summary: {
+      jobMatchesFound: 0,
+      applicationsSubmitted: 0,
+      recruiterMessagesPrepared: 0,
+      referralRequestsPrepared: 0,
+    },
+    steps: [],
+  };
+  store.linkedInAgentRuns.unshift(runningRun);
+  emitAutomationUpdate({ source: "agent", run: runningRun });
 
   const steps: LinkedInAgentStep[] = [];
   const summary = {
@@ -374,11 +395,19 @@ export function runLinkedInAgent(payload: CreateLinkedInRunPayload) {
       const toSend = drafts.slice(0, remaining);
 
       toSend.forEach((draft) => {
-        createFollowUpMessage({
+        const followUp = createFollowUpMessage({
           contactName: draft.name,
           company: job.company,
           role: job.title,
           message: draft.message,
+        });
+
+        // Record that we attempted a connection + referral ask with this contact.
+        store.outreachHistory.unshift({
+          ...followUp,
+          id: createId("conn"),
+          type: "LinkedIn Connection Request",
+          sentAt: new Date().toISOString(),
         });
       });
 
@@ -460,7 +489,7 @@ export function runLinkedInAgent(payload: CreateLinkedInRunPayload) {
   );
 
   const run: LinkedInAgentRun = {
-    id: createId("lnrun"),
+    id: runId,
     mode,
     jobId: job.id,
     company: job.company,
@@ -471,7 +500,13 @@ export function runLinkedInAgent(payload: CreateLinkedInRunPayload) {
     steps,
   };
 
-  store.linkedInAgentRuns.unshift(run);
+  const existingIndex = store.linkedInAgentRuns.findIndex((item) => item.id === runId);
+  if (existingIndex >= 0) {
+    store.linkedInAgentRuns[existingIndex] = run;
+  } else {
+    store.linkedInAgentRuns.unshift(run);
+  }
+  emitAutomationUpdate({ source: "agent", run });
 
   addActivity(
     "network",

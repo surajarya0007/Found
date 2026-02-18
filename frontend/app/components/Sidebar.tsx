@@ -11,6 +11,7 @@ const navItems = [
   { href: "/network", label: "Networking Hub", icon: "🤝" },
   { href: "/referrals", label: "Referrals", icon: "🔗" },
   { href: "/profile", label: "Profile", icon: "👤" },
+  { href: "/automation", label: "Automation", icon: "⚡" },
 ];
 
 export default function Sidebar() {

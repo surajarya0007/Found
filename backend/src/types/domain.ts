@@ -183,7 +183,7 @@ export interface LinkedInAgentRun {
   company: string;
   role: string;
   createdAt: string;
-  status: "success" | "partial" | "error";
+  status: "running" | "success" | "partial" | "error";
   summary: {
     jobMatchesFound: number;
     applicationsSubmitted: number;
@@ -226,7 +226,7 @@ export interface LinkedInBrowserRun {
   createdAt: string;
   query: string;
   location: string;
-  status: "success" | "partial" | "error";
+  status: "running" | "success" | "partial" | "error";
   discoveredJobs: Array<{
     title: string;
     company: string;
